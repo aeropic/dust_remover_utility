@@ -2,11 +2,27 @@
 #                                                         #
 #              AEROPIC dust remover utility               #
 #                                                         #
-#                        V3.0                             #
+#                        V3.1                             #
 #                                                         #
 ###########################################################
 
-import sys, os, time
+import sys, os, subprocess
+
+def install_dependencies():
+    """ Check and install missing dependencies at runtime """
+    modules = ["opencv-python", "astropy", "PyQt6", "sirilpy"]
+    for mod in modules:
+        try:
+            # Note: opencv-python is imported as 'cv2'
+            import_name = "cv2" if mod == "opencv-python" else mod
+            __import__(import_name)
+        except ImportError:
+            print(f"Installing missing dependency: {mod}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", mod])
+
+# Run installation check before any other imports
+install_dependencies()
+
 import numpy as np
 import cv2
 from astropy.io import fits
@@ -23,7 +39,7 @@ class AEROPIC(QMainWindow):
         # Display decorated title and version in logs
         self.header_text = (
             "\n###########################################################"
-            "\n#              AEROPIC dust remover utility V3.0          #"
+            "\n#              AEROPIC dust remover utility V3.1          #"
             "\n###########################################################"
         )
         try: self.siril.log(self.header_text)
@@ -47,17 +63,17 @@ class AEROPIC(QMainWindow):
         self.min_val, self.max_val = np.nanmin(self.data), np.nanmax(self.data)
         
         # State and Navigation variables
-        self.src_pos = None       # Source position (Siril bottom-left coords)
-        self.history = []         # Undo buffer
-        self.pan_start = None     # Right-click panning start anchor
-        self.offset = [0, 0]      # Viewport panning offset
-        self.stamp_offset = None  # Distance between source and target for persistent dragging
-        self.mouse_pos = (0, 0)   # Current cursor position on UI
-        self.vw, self.vh = 1400, 900 # Fixed Viewport dimensions
+        self.src_pos = None       
+        self.history = []         
+        self.pan_start = None     
+        self.offset = [0, 0]      
+        self.stamp_offset = None  
+        self.mouse_pos = (0, 0)   
+        self.vw, self.vh = 1400, 900 
         
         # Performance Caching
-        self._last_r_z = -1       # Tracks if radius or zoom changed to refresh mask
-        self._cached_mask = None  # Pre-calculated circular ghost mask
+        self._last_r_z = -1       
+        self._cached_mask = None  
 
         self.init_ui()
         self.setup_cv()
@@ -71,7 +87,7 @@ class AEROPIC(QMainWindow):
         return s
 
     def init_ui(self):
-        self.setWindowTitle("AEROPIC dust remover")
+        self.setWindowTitle("AEROPIC V2.9c")
         self.setFixedWidth(380)
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
         central = QWidget(); self.setCentralWidget(central)
@@ -99,32 +115,26 @@ class AEROPIC(QMainWindow):
         cv2.namedWindow("AEROPIC View", cv2.WINDOW_NORMAL); cv2.resizeWindow("AEROPIC View", self.vw, self.vh)
         cv2.setMouseCallback("AEROPIC View", self.on_mouse)
         self.timer = QTimer(); self.timer.timeout.connect(self.loop)
-        # 40ms timer (25 FPS) provides a smoother CPU overhead on non-GPU systems
         self.timer.start(40) 
 
     def on_mouse(self, event, x, y, flags, param):
         self.mouse_pos = (x, y)
         z = self.sld_z.value() / 100.0
-        # Calculate viewport padding and map mouse to real image pixels (rx, ry)
         pad_x, pad_y = max(0, (self.vw-int(self.w*z))//2), max(0, (self.vh-int(self.h*z))//2)
         rx, ry = int((x-pad_x+self.offset[1])/z), self.h-int((y-pad_y+self.offset[0])/z)
 
         if event == cv2.EVENT_LBUTTONDOWN:
             if flags & cv2.EVENT_FLAG_ALTKEY: 
-                # Define cloning source
                 self.src_pos = (ry, rx); self.stamp_offset = None 
             elif self.src_pos:
-                # Capture initial drag offset if not in 'Locked' mode
                 if not self.chk_lock.isChecked() and self.stamp_offset is None:
                     self.stamp_offset = (ry - self.src_pos[0], rx - self.src_pos[1])
                 self.clone(ry, rx, save_history=True)
                 
         elif event == cv2.EVENT_MOUSEMOVE:
             if flags & cv2.EVENT_FLAG_LBUTTON and self.src_pos:
-                # Continuous cloning during drag
                 self.clone(ry, rx, save_history=False)
             elif flags & cv2.EVENT_FLAG_RBUTTON and self.pan_start:
-                # Viewport panning logic
                 self.offset[1] -= (x - self.pan_start[0]); self.offset[0] -= (y - self.pan_start[1])
                 self.pan_start = (x, y)
                 
@@ -132,29 +142,18 @@ class AEROPIC(QMainWindow):
             self.pan_start = (x, y)
 
     def clone(self, yd, xd, save_history=True):
-        """ Core cloning function using NumPy slicing and alpha masking """
         if not self.src_pos: return
-        
-        # Calculate source coordinates based on mode
         ys, xs = (yd - self.stamp_offset[0], xd - self.stamp_offset[1]) if (self.stamp_offset and not self.chk_lock.isChecked()) else self.src_pos
         r = self.sld_r.value() // 2
-        
         if save_history:
             self.history.append(self.data.copy())
             if len(self.history) > 15: self.history.pop(0)
-            
-        # Generate feathering mask (Circular with hardness)
         y, x = np.ogrid[-r:r, -r:r]
         mask = np.clip((r - np.sqrt(x*x + y*y)) / (r * (1.0 - self.sld_h.value()/100.0 + 0.01)), 0, 1) * (self.sld_o.value()/100.0)
-        
-        # Determine valid overlapping regions for Source and Destination
         y1d, y2d, x1d, x2d = max(0, yd-r), min(self.h, yd+r), max(0, xd-r), min(self.w, xd+r)
         y1s, x1s = int(ys-(yd-y1d)), int(xs-(xd-x1d))
         y2s, x2s = int(y1s+(y2d-y1d)), int(x1s+(x2d-x1d))
-        
         if y1s < 0 or x1s < 0 or y2s > self.h or x2s > self.w: return
-        
-        # Apply cloning per channel
         lm = mask[r-(yd-y1d):r+(y2d-yd), r-(xd-x1d):r+(x2d-xd)]
         for i in range(self.c):
             self.data[i, y1d:y2d, x1d:x2d] = self.data[i, y1d:y2d, x1d:x2d]*(1-lm) + self.data[i, y1s:y2s, x1s:x2s]*lm
@@ -163,20 +162,12 @@ class AEROPIC(QMainWindow):
         if self.history: self.data = self.history.pop()
 
     def loop(self):
-        """ Main display loop: Stretch -> Resize -> Ghost Rendering """
-        # Image transformation for OpenCV (BGR + Top-Left origin)
         img_disp = np.flipud(np.transpose(self.data, (1, 2, 0))[:, :, ::-1] if self.c > 1 else self.data)
-        
-        # Visual stretch (clipping max values based on slider)
         w_clip = self.min_val + (self.max_val - self.min_val) * ((101 - self.sld_s.value()) / 100.0)
         disp = (np.clip((img_disp - self.min_val) / (w_clip - self.min_val + 1e-7), 0, 1) * 255).astype(np.uint8)
         if disp.ndim == 2: disp = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
-        
-        # Scaling with INTER_NEAREST for maximum UI reactivity
         z = self.sld_z.value() / 100.0
         disp_z = cv2.resize(disp, None, fx=z, fy=z, interpolation=cv2.INTER_NEAREST)
-        
-        # Build viewport view
         view = np.zeros((self.vh, self.vw, 3), dtype=np.uint8)
         h_z, w_z = disp_z.shape[:2]
         self.offset = [int(np.clip(self.offset[0], 0, max(0, h_z - self.vh))), int(np.clip(self.offset[1], 0, max(0, w_z - self.vw)))]
@@ -184,44 +175,32 @@ class AEROPIC(QMainWindow):
         crop = disp_z[y1:y2, x1:x2]
         py, px = (self.vh-crop.shape[0])//2, (self.vw-crop.shape[1])//2
         view[py:py+crop.shape[0], px:px+crop.shape[1]] = crop
-        
-        # Render the Ghost Stamp preview
         if self.src_pos:
             r = self.sld_r.value() // 2; mx, my = self.mouse_pos
             rx, ry = (mx - px + self.offset[1]) / z, (my - py + self.offset[0]) / z
             isrc_y, isrc_x = self.h - self.src_pos[0], self.src_pos[1]
-            
-            # Use persistent offset if available (Photoshop mode)
             if self.chk_lock.isChecked(): ys_cv, xs_cv = isrc_y, isrc_x
             elif self.stamp_offset: ys_cv, xs_cv = ry + self.stamp_offset[0], rx - self.stamp_offset[1]
             else: ys_cv, xs_cv = isrc_y, isrc_x
-
             y1s, y2s, x1s, x2s = int(ys_cv - r), int(ys_cv + r), int(xs_cv - r), int(xs_cv + r)
             if 0 <= y1s and y2s < self.h and 0 <= x1s and x2s < self.w:
                 sz_out = int(2*r*z)
                 if sz_out > 2:
-                    # Update circular mask cache only if size changes
                     if sz_out != self._last_r_z:
                         self._last_r_z = sz_out
                         self._cached_mask = np.zeros((sz_out, sz_out, 1), dtype=np.uint8)
                         cv2.circle(self._cached_mask, (sz_out//2, sz_out//2), sz_out//2, 255, -1)
-                    
-                    # Blend the source pixels over the target view
                     stamp = cv2.resize(disp[y1s:y2s, x1s:x2s], (sz_out, sz_out), interpolation=cv2.INTER_NEAREST)
                     szh = sz_out // 2
                     t_y1, t_y2, t_x1, t_x2 = my-szh, my-szh+sz_out, mx-szh, mx-szh+sz_out
-                    
                     if 0 <= t_y1 and t_y2 < self.vh and 0 <= t_x1 and t_x2 < self.vw:
                         target = view[t_y1:t_y2, t_x1:t_x2]
                         if target.shape[:2] == stamp.shape[:2]:
-                            # Optimized blending using cached mask and np.where
                             view[t_y1:t_y2, t_x1:t_x2] = np.where(self._cached_mask == 255, cv2.addWeighted(target, 0.4, stamp, 0.6, 0), target)
                             cv2.circle(view, (mx, my), szh, (255, 255, 255), 1)
-
         cv2.imshow("AEROPIC View", view); cv2.waitKey(1)
 
     def save_auto(self):
-        """ Export cleaned image to FITS """
         try:
             out = f"{os.path.splitext(self.current_file)[0]}_clean.fit"
             fits.PrimaryHDU(data=self.data.astype(np.float32), header=self.header).writeto(out, overwrite=True)
