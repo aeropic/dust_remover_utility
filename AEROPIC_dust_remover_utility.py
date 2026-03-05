@@ -87,7 +87,7 @@ class AEROPIC(QMainWindow):
         return s
 
     def init_ui(self):
-        self.setWindowTitle("AEROPIC V2.9c")
+        self.setWindowTitle("AEROPIC dust remover utility V3.1")
         self.setFixedWidth(380)
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
         central = QWidget(); self.setCentralWidget(central)
@@ -212,3 +212,4 @@ class AEROPIC(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv); win = AEROPIC(); win.show(); sys.exit(app.exec())
+
